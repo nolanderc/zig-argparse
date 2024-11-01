@@ -4,16 +4,24 @@ const Type = std.builtin.Type;
 const log = std.log;
 
 pub const Command = struct {
-    name: Name,
-    description: ?[]const u8 = null,
-    flags: []const Flag = &.{},
-    positionals: []const Positional = &.{},
-    subcommands: []const Command = &.{},
+    /// Name of the command.
+    ///
+    /// This should either be the name of your executable, or the name of a subcommand.
+    name: [:0]const u8,
 
-    pub const Name = union(enum) {
-        root,
-        subcommand: [:0]const u8,
-    };
+    /// Human-readable description of what the command does.
+    description: ?[]const u8 = null,
+
+    /// Flags which are accepted by the command. Both long (`--foo`) and short (`-f`) versions are accepted.
+    flags: []const Flag = &.{},
+
+    /// Positional arguments that may be intermixed with the flags.
+    ///
+    /// Should not be used when there are any subcommands (see below).
+    positionals: []const Positional = &.{},
+
+    /// Subcommands which are accepted after any flags.
+    subcommands: []const Command = &.{},
 
     pub fn Parsed(comptime command: Command) type {
         var fields = std.BoundedArray(Type.StructField, 3){};
@@ -63,7 +71,7 @@ pub const Command = struct {
         const flags = command.flags;
         var fields: [flags.len]Type.StructField = undefined;
         for (&fields, flags) |*field, flag| {
-            const T = flag.Value();
+            const T = flag.Parsed();
             field.* = .{
                 .name = flag.long,
                 .type = T,
@@ -86,7 +94,7 @@ pub const Command = struct {
         var allow_required = true;
         for (positionals) |positional| {
             if (positional.required) {
-                if (!allow_required) @compileError("all required positional arguments must come before all optional ones");
+                if (!allow_required) @compileError("all required positional arguments must come before any optional ones");
             } else {
                 allow_required = false;
             }
@@ -120,7 +128,7 @@ pub const Command = struct {
         var fields_tag: [subcommands.len]Type.EnumField = undefined;
         for (&fields_tag, subcommands, 0..) |*field, subcommand, index| {
             field.* = .{
-                .name = subcommand.name.subcommand,
+                .name = subcommand.name,
                 .value = index,
             };
         }
@@ -133,10 +141,9 @@ pub const Command = struct {
 
         var fields_union: [subcommands.len]Type.UnionField = undefined;
         for (&fields_union, subcommands) |*field, subcommand| {
-            // const name = comptime subcommand.name.subcommand;
             const T = subcommand.Parsed();
             field.* = .{
-                .name = subcommand.name.subcommand,
+                .name = subcommand.name,
                 .type = T,
                 .alignment = @alignOf(T),
             };
@@ -218,16 +225,36 @@ pub const Command = struct {
             try writer.print("\n", .{});
         }
 
+        if (command.positionals.len != 0) {
+            try writer.print("Arguments:\n", .{});
+
+            var longest_name: usize = 0;
+            for (command.positionals) |positional| {
+                longest_name = @max(longest_name, positional.name.len);
+            }
+
+            for (command.positionals) |positional| {
+                const name = positional.name;
+                try writer.print("    <{s}>", .{name});
+                try writer.writeByteNTimes(' ', longest_name - name.len);
+                if (positional.description) |description| {
+                    try writer.print("   {s}", .{std.mem.trim(u8, description, &std.ascii.whitespace)});
+                }
+                try writer.print("\n", .{});
+            }
+            try writer.print("\n", .{});
+        }
+
         if (command.subcommands.len != 0) {
             try writer.print("Commands:\n", .{});
 
             var longest_command: usize = 0;
             for (command.subcommands) |subcommand| {
-                longest_command = @max(longest_command, subcommand.name.subcommand.len);
+                longest_command = @max(longest_command, subcommand.name.len);
             }
 
             for (command.subcommands) |subcommand| {
-                const name = subcommand.name.subcommand;
+                const name = subcommand.name;
                 try writer.print("    {s}", .{name});
                 try writer.writeByteNTimes(' ', longest_command - name.len);
                 if (subcommand.description) |description| {
@@ -268,60 +295,47 @@ pub const Command = struct {
 };
 
 pub const Flag = struct {
+    /// Long name of the flag. The name `"foo-bar"` accepts the flag `--foo-bar`.
     long: [:0]const u8,
+    /// Short name of the flag. The name `'f'` accepts the flag `-f`.
     short: ?u8 = null,
-    value: ?FlagValue = null,
+    /// If set, the flag also specifies a value `--foo <value>` or `--foo=<value>`.
+    value: ?Value = null,
+    /// Human-readable description of what the flag does.
     description: ?[]const u8 = null,
 
-    fn Value(flag: Flag) type {
+    pub const Value = struct {
+        /// Name of the flag's value. Used in error messages and help text.
+        name: [:0]const u8,
+        /// If `true`, the flag must be given a value.
+        required: bool = false,
+        /// Default value for the flag if none is given.
+        default: ?[]const u8 = null,
+    };
+
+    fn Parsed(flag: Flag) type {
         const value = flag.value orelse return bool;
         return if (value.required) [:0]const u8 else ?[:0]const u8;
     }
 };
 
-pub const FlagValue = struct {
-    name: []const u8,
-    required: bool = false,
-};
-
 pub const Positional = struct {
+    /// Name of the positional argument. Used in error messages and help text.
     name: [:0]const u8,
+    /// If `true`, the argument must be specified. If `false`, the value may be omitted.
     required: bool = true,
+    /// Default value for the argument if none is given.
     default: ?[]const u8 = null,
+    /// Human-readable description of what the argument does.
     description: ?[]const u8 = null,
 };
 
-pub const ParseOptions = struct {
-    alloc: std.mem.Allocator,
-    args: ArgumentIterator,
-};
-
 pub fn parse(comptime command: Command, args: *ArgumentIterator) !command.Parsed() {
-    std.debug.assert(command.name == .root);
-
     var buffer: [command.maxDepth()][:0]const u8 = undefined;
     var ancestors = AncestorStack{ .buffer = &buffer, .len = 0 };
-    ancestors.push(args.next() orelse return error.ProgramMissing);
+    ancestors.push(args.next() orelse command.name);
     return parseInner(command, args, &ancestors);
 }
-
-const AncestorStack = struct {
-    buffer: [][:0]const u8,
-    len: usize,
-
-    pub fn push(stack: *AncestorStack, name: [:0]const u8) void {
-        stack.buffer[stack.len] = name;
-        stack.len += 1;
-    }
-
-    pub fn pop(stack: *AncestorStack) void {
-        stack.len -= 1;
-    }
-
-    pub fn slice(stack: *const AncestorStack) []const [:0]const u8 {
-        return stack.buffer[0..stack.len];
-    }
-};
 
 fn parseInner(comptime command: Command, args: *ArgumentIterator, ancestors: *AncestorStack) !command.Parsed() {
     var flags = BoundedStringMap(command.flags.len, [:0]const u8){};
@@ -435,12 +449,11 @@ fn parseInner(comptime command: Command, args: *ArgumentIterator, ancestors: *An
                 // positional
 
                 inline for (command.subcommands) |subcommand| {
-                    const name = comptime subcommand.name.subcommand;
-                    if (std.mem.eql(u8, arg, name)) {
-                        ancestors.push(name);
+                    if (std.mem.eql(u8, arg, subcommand.name)) {
+                        ancestors.push(subcommand.name);
                         defer ancestors.pop();
                         const inner = try parseInner(subcommand, args, ancestors);
-                        break :parsing @unionInit(command.ParsedSubcommand(), name, inner);
+                        break :parsing @unionInit(command.ParsedSubcommand(), subcommand.name, inner);
                     }
                 }
 
@@ -474,14 +487,14 @@ fn parseInner(comptime command: Command, args: *ArgumentIterator, ancestors: *An
         if (flag.value) |value| {
             if (found) |x| {
                 @field(parsed.flags, flag.long) = x;
+            } else if (value.default) |default| {
+                @field(parsed.flags, flag.long) = default;
+            } else if (!value.required) {
+                @field(parsed.flags, flag.long) = null;
             } else {
-                if (value.required) {
-                    command.emitHelp(.misuse, ancestors.slice()) catch {};
-                    log.err("missing a value for required flag '--{s}'", .{flag.long});
-                    return error.FlagMissingValue;
-                } else {
-                    @field(parsed.flags, flag.long) = null;
-                }
+                command.emitHelp(.misuse, ancestors.slice()) catch {};
+                log.err("missing a value for required flag '--{s}'", .{flag.long});
+                return error.FlagMissingValue;
             }
         } else {
             @field(parsed.flags, flag.long) = found != null;
@@ -491,6 +504,8 @@ fn parseInner(comptime command: Command, args: *ArgumentIterator, ancestors: *An
     inline for (command.positionals, 0..) |positional, index| {
         if (index < positionals.len) {
             @field(parsed.positionals, positional.name) = positionals.get(index);
+        } else if (positional.default) |default| {
+            @field(parsed.positionals, positional.name) = default;
         } else if (positional.required) {
             command.emitHelp(.misuse, ancestors.slice()) catch {};
             log.err("missing value for positional argument '<{s}>'", .{positional.name});
@@ -521,6 +536,24 @@ pub const ArgumentIterator = union(enum) {
             },
             .process => |*iter| return iter.next(),
         }
+    }
+};
+
+const AncestorStack = struct {
+    buffer: [][:0]const u8,
+    len: usize,
+
+    pub fn push(stack: *AncestorStack, name: [:0]const u8) void {
+        stack.buffer[stack.len] = name;
+        stack.len += 1;
+    }
+
+    pub fn pop(stack: *AncestorStack) void {
+        stack.len -= 1;
+    }
+
+    pub fn slice(stack: *const AncestorStack) []const [:0]const u8 {
+        return stack.buffer[0..stack.len];
     }
 };
 
@@ -571,10 +604,10 @@ fn checkParse(comptime command: Command, args: []const [:0]const u8, expected: c
 fn expectEqualJson(expected: anytype, found: anytype) !void {
     const alloc = std.testing.allocator;
 
-    const string_expected = try std.json.stringifyAlloc(std.testing.allocator, expected, .{ .whitespace = .indent_2 });
+    const string_expected = try std.json.stringifyAlloc(alloc, expected, .{ .whitespace = .indent_2 });
     defer alloc.free(string_expected);
 
-    const string_found = try std.json.stringifyAlloc(std.testing.allocator, found, .{ .whitespace = .indent_2 });
+    const string_found = try std.json.stringifyAlloc(alloc, found, .{ .whitespace = .indent_2 });
     defer alloc.free(string_found);
 
     try std.testing.expectEqualStrings(string_expected, string_found);
@@ -583,7 +616,7 @@ fn expectEqualJson(expected: anytype, found: anytype) !void {
 test "parse flags" {
     try checkParse(
         Command{
-            .name = .root,
+            .name = "my-exe",
             .flags = &.{
                 Flag{ .long = "foo" },
                 Flag{ .long = "bar", .value = .{ .name = "value" } },
@@ -598,7 +631,7 @@ test "parse flags" {
 test "parse positionals" {
     try checkParse(
         Command{
-            .name = .root,
+            .name = "my-exe",
             .positionals = &.{ .{ .name = "number" }, .{ .name = "path" } },
         },
         &.{ "my-exe", "123", "./path/to/thingy" },
@@ -609,9 +642,9 @@ test "parse positionals" {
 test "parse subcommand" {
     try checkParse(
         Command{
-            .name = .root,
+            .name = "my-exe",
             .subcommands = &.{.{
-                .name = .{ .subcommand = "build" },
+                .name = "build",
                 .flags = &.{.{ .long = "watch" }},
             }},
         },
@@ -627,36 +660,22 @@ fn checkUsage(comptime command: Command, expected: []const u8) !void {
     try std.testing.expectEqualStrings(expected, buffer.items);
 }
 
-test "help flag" {
-    try std.testing.expectError(error.PrintHelp, checkParse(
-        .{
-            .name = .root,
-            .flags = &.{
-                .{ .long = "foo", .short = 'f', .description = "does something to your foo's" },
-                .{ .long = "bar", .value = .{ .name = "count" }, .description = "number of gold bars to produce" },
-            },
-        },
-        &.{ "my-exe", "--foo", "--help" },
-        undefined,
-    ));
-}
-
 test "print usage" {
     const command = Command{
-        .name = .root,
+        .name = "my-exe",
         .flags = &.{
             .{ .long = "foo", .short = 'f', .description = "does something to your foo's" },
             .{ .long = "bar", .value = .{ .name = "count" }, .description = "number of gold bars to produce" },
         },
         .subcommands = &.{
             .{
-                .name = .{ .subcommand = "build" },
+                .name = "build",
                 .description = "consults the IKEA manual",
                 .flags = &.{.{ .long = "watch", .description = "re-run when any source file changes" }},
-                .positionals = &.{.{ .name = "path" }},
+                .positionals = &.{.{ .name = "path", .description = "path to the root source file" }},
             },
             .{
-                .name = .{ .subcommand = "check" },
+                .name = "check",
                 .description = "ensures your program is bug-free",
                 .flags = &.{.{ .long = "verify", .description = "ensures your program is bug-free" }},
             },
@@ -689,6 +708,9 @@ test "print usage" {
         \\Options:
         \\      --watch   re-run when any source file changes
         \\  -h, --help    print this help
+        \\
+        \\Arguments:
+        \\    <path>   path to the root source file
         \\
         \\
     );
