@@ -62,7 +62,33 @@ defer iterator.process.deinit();
 const args = argparse.parse(command, &iterator) catch return 1;
 ```
 
-If you then run your executable with `zig build run -- --help`, you should see the following:
+The value returned from `parse` has a type derived from your command:
+
+```zig
+struct {
+    flags: struct {
+        foo: bool,
+        bar: [:0]const u8,
+    },
+    subcommand: ?union(enum) {
+        build: struct {
+            flags: struct {
+                watch: bool,
+            },
+            positionals: struct {
+                path: [:0]const u8,
+            },
+        },
+        check: struct {
+            flags: struct {
+                verify: bool,
+            },
+        },
+    },
+}
+```
+
+If run your executable with `zig build run -- --help`, you should see the following:
 
 ```
 builds your favourite software
@@ -78,5 +104,21 @@ Commands:
     build   consults the IKEA manual
     check   ensures your program is bug-free
 ```
+
+And you can to the same with any of the subcommands, `zig build run -- build --help`:
+
+```zig
+consults the IKEA manual
+
+Usage: handyman build [OPTIONS] <path>
+
+Options:
+      --watch   re-run when any source file changes
+  -h, --help    print this help
+
+Arguments:
+    <path>   path to your source file
+```
+
 
 For a full example, see `src/example.zig`.
