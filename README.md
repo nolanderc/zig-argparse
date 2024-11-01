@@ -107,7 +107,7 @@ Commands:
 
 And you can to the same with any of the subcommands, `zig build run -- build --help`:
 
-```zig
+```
 consults the IKEA manual
 
 Usage: handyman build [OPTIONS] <path>
