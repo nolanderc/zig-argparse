@@ -176,7 +176,10 @@ pub const Command = struct {
         };
 
         var writer = std.io.bufferedWriter(stream.writer());
-        try command.writeUsage(writer.writer(), ancestors);
+        try command.writeUsage(
+            writer.writer(),
+            if (ancestors.len == 0) &.{command.name} else ancestors,
+        );
         try writer.flush();
     }
 
@@ -331,13 +334,18 @@ pub const Positional = struct {
 };
 
 pub fn parse(comptime command: Command, args: *ArgumentIterator) !command.Parsed() {
+    // skip the path to the executable
+    _ = args.next();
+
     var buffer: [command.maxDepth()][:0]const u8 = undefined;
     var ancestors = AncestorStack{ .buffer = &buffer, .len = 0 };
-    ancestors.push(args.next() orelse command.name);
     return parseInner(command, args, &ancestors);
 }
 
 fn parseInner(comptime command: Command, args: *ArgumentIterator, ancestors: *AncestorStack) !command.Parsed() {
+    ancestors.push(command.name);
+    defer ancestors.pop();
+
     var flags = BoundedStringMap(command.flags.len, [:0]const u8){};
     var positionals = std.BoundedArray([:0]const u8, command.positionals.len){};
 
@@ -450,8 +458,6 @@ fn parseInner(comptime command: Command, args: *ArgumentIterator, ancestors: *An
 
                 inline for (command.subcommands) |subcommand| {
                     if (std.mem.eql(u8, arg, subcommand.name)) {
-                        ancestors.push(subcommand.name);
-                        defer ancestors.pop();
                         const inner = try parseInner(subcommand, args, ancestors);
                         break :parsing @unionInit(command.ParsedSubcommand(), subcommand.name, inner);
                     }
