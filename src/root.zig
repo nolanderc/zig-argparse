@@ -1,7 +1,7 @@
 const std = @import("std");
 const Type = std.builtin.Type;
 
-const log = std.log.scoped(.argparse);
+const log = std.log;
 
 pub const Command = struct {
     name: Name,
@@ -625,6 +625,20 @@ fn checkUsage(comptime command: Command, expected: []const u8) !void {
     defer buffer.deinit();
     try command.writeUsage(buffer.writer(), &.{"<program>"});
     try std.testing.expectEqualStrings(expected, buffer.items);
+}
+
+test "help flag" {
+    try std.testing.expectError(error.PrintHelp, checkParse(
+        .{
+            .name = .root,
+            .flags = &.{
+                .{ .long = "foo", .short = 'f', .description = "does something to your foo's" },
+                .{ .long = "bar", .value = .{ .name = "count" }, .description = "number of gold bars to produce" },
+            },
+        },
+        &.{ "my-exe", "--foo", "--help" },
+        undefined,
+    ));
 }
 
 test "print usage" {
